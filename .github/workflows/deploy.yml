@@ -27,11 +27,14 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Iniciar sesión en Azure Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.ACR_NAME }}.azurecr.io
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          # Las credenciales del registro se leen desde Azure con la sesión del Service Principal
+          ACR_USER=$(az acr credential show -n "$ACR_NAME" --query username -o tsv)
+          ACR_PASS=$(az acr credential show -n "$ACR_NAME" --query "passwords[0].value" -o tsv)
+          echo "::add-mask::$ACR_PASS"
+          echo "ACR_USER=$ACR_USER" >> "$GITHUB_ENV"
+          echo "ACR_PASS=$ACR_PASS" >> "$GITHUB_ENV"
+          echo "$ACR_PASS" | docker login "$ACR_NAME.azurecr.io" -u "$ACR_USER" --password-stdin
 
       - name: Construir y publicar la imagen Docker
         run: |
@@ -41,8 +44,6 @@ jobs:
 
       - name: Desplegar en Azure Container Apps
         env:
-          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
           DBX_URL: ${{ secrets.DATABRICKS_ENDPOINT_URL }}
           DBX_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
@@ -56,7 +57,7 @@ jobs:
             az containerapp secret set -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
               --secrets dbx-url="$DBX_URL" dbx-token="$DBX_TOKEN" --only-show-errors
             az containerapp registry set -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
-              --server "$SERVER" --username "$ACR_USERNAME" --password "$ACR_PASSWORD" --only-show-errors
+              --server "$SERVER" --username "$ACR_USER" --password "$ACR_PASS" --only-show-errors
             az containerapp update -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
               --image "$IMAGE" \
               --set-env-vars DATABRICKS_ENDPOINT_URL=secretref:dbx-url DATABRICKS_TOKEN=secretref:dbx-token \
@@ -66,7 +67,7 @@ jobs:
             az containerapp create -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
               --environment "$CONTAINERAPPS_ENV" \
               --image "$IMAGE" \
-              --registry-server "$SERVER" --registry-username "$ACR_USERNAME" --registry-password "$ACR_PASSWORD" \
+              --registry-server "$SERVER" --registry-username "$ACR_USER" --registry-password "$ACR_PASS" \
               --secrets dbx-url="$DBX_URL" dbx-token="$DBX_TOKEN" \
               --env-vars DATABRICKS_ENDPOINT_URL=secretref:dbx-url DATABRICKS_TOKEN=secretref:dbx-token \
               --ingress external --target-port 8000 \
