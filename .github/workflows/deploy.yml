@@ -60,7 +60,7 @@ jobs:
               --server "$SERVER" --username "$ACR_USER" --password "$ACR_PASS" --only-show-errors
             az containerapp update -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
               --image "$IMAGE" \
-              --set-env-vars DATABRICKS_ENDPOINT_URL=secretref:dbx-url DATABRICKS_TOKEN=secretref:dbx-token \
+              --set-env-vars DATABRICKS_ENDPOINT_URL=secretref:dbx-url DATABRICKS_TOKEN=secretref:dbx-token DEPLOY_ID=${{ github.run_id }}-${{ github.run_attempt }} \
               --min-replicas 1 --max-replicas 1 --only-show-errors
           else
             echo "El Container App no existe → se crea"
