@@ -15,8 +15,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-DATABRICKS_ENDPOINT_URL = os.getenv("DATABRICKS_ENDPOINT_URL", "")
-DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN", "")
+DATABRICKS_ENDPOINT_URL = os.getenv("DATABRICKS_ENDPOINT_URL", "").strip()
+DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN", "").strip()
 TIMEOUT_S = float(os.getenv("DATABRICKS_TIMEOUT", "120"))  # margen por si el endpoint está arrancando
 
 app = FastAPI(
@@ -86,11 +86,14 @@ def predecir(paciente: Paciente):
             json={"dataframe_records": [registro]},
             timeout=TIMEOUT_S,
         )
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"No se pudo contactar el endpoint de Databricks: {e}")
+    except Exception as e:  # URL inválida, DNS, timeout, etc.
+        raise HTTPException(status_code=502, detail=f"No se pudo contactar el endpoint de Databricks ({type(e).__name__}): {str(e)[:200]}")
 
     if respuesta.status_code != 200:
         raise HTTPException(status_code=502, detail=f"Databricks respondió {respuesta.status_code}: {respuesta.text[:300]}")
 
-    predicciones = respuesta.json().get("predictions", [])
-    return {"predictions": [int(round(float(p))) for p in predicciones]}
+    try:
+        predicciones = respuesta.json().get("predictions", [])
+        return {"predictions": [int(round(float(p))) for p in predicciones]}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Respuesta inesperada de Databricks ({type(e).__name__}): {respuesta.text[:300]}")
