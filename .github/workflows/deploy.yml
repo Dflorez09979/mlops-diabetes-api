@@ -1,0 +1,94 @@
+name: Build y despliegue en Azure Container Apps
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# ── Nombres de la infraestructura en Azure ────────────────────────────────────
+env:
+  RESOURCE_GROUP: rg-mlops-diabetes    # Resource Group del proyecto
+  CONTAINERAPPS_ENV: env-mlops-diabetes # Container Apps Environment
+  ACR_NAME: acrdflorezmlops            # Azure Container Registry (solo el nombre, sin .azurecr.io)
+  CONTAINER_APP: api-diabetes-final    # Container App NUEVO del proyecto final
+  IMAGE_NAME: mlops-diabetes-api
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Iniciar sesión en Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Iniciar sesión en Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_NAME }}.azurecr.io
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Construir y publicar la imagen Docker
+        run: |
+          IMAGE=${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Desplegar en Azure Container Apps
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          DBX_URL: ${{ secrets.DATABRICKS_ENDPOINT_URL }}
+          DBX_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          set -e
+          az extension add --name containerapp --upgrade --only-show-errors
+          IMAGE=${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          SERVER=${{ env.ACR_NAME }}.azurecr.io
+
+          if az containerapp show -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" > /dev/null 2>&1; then
+            echo "El Container App ya existe → se actualiza"
+            az containerapp secret set -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
+              --secrets dbx-url="$DBX_URL" dbx-token="$DBX_TOKEN" --only-show-errors
+            az containerapp registry set -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
+              --server "$SERVER" --username "$ACR_USERNAME" --password "$ACR_PASSWORD" --only-show-errors
+            az containerapp update -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
+              --image "$IMAGE" \
+              --set-env-vars DATABRICKS_ENDPOINT_URL=secretref:dbx-url DATABRICKS_TOKEN=secretref:dbx-token \
+              --min-replicas 1 --max-replicas 1 --only-show-errors
+          else
+            echo "El Container App no existe → se crea"
+            az containerapp create -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
+              --environment "$CONTAINERAPPS_ENV" \
+              --image "$IMAGE" \
+              --registry-server "$SERVER" --registry-username "$ACR_USERNAME" --registry-password "$ACR_PASSWORD" \
+              --secrets dbx-url="$DBX_URL" dbx-token="$DBX_TOKEN" \
+              --env-vars DATABRICKS_ENDPOINT_URL=secretref:dbx-url DATABRICKS_TOKEN=secretref:dbx-token \
+              --ingress external --target-port 8000 \
+              --cpu 0.25 --memory 0.5Gi \
+              --min-replicas 1 --max-replicas 1 --only-show-errors
+          fi
+
+          FQDN=$(az containerapp show -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
+                   --query properties.configuration.ingress.fqdn -o tsv)
+          echo "API_URL=https://$FQDN" >> "$GITHUB_ENV"
+
+      - name: Verificar que la API responde
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS "$API_URL/health"; then
+              echo ""
+              echo "API activa en $API_URL"
+              echo "### API publicada: $API_URL" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Intento $i: la API aún no responde, reintento en 15 s..."
+            sleep 15
+          done
+          echo "La API no respondió en /health"
+          exit 1
